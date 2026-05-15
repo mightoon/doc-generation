@@ -1,0 +1,3 @@
+.codebuddy/
+__pycache__/
+models_config.json

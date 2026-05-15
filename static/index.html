@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>文档生成智能体</title>
+  <link rel="stylesheet" href="/style.css?v=6">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+</head>
+<body>
+  <div id="app">
+    <!-- 顶部导航 -->
+    <header class="app-header">
+      <div class="logo">
+        <i class="fas fa-file-alt"></i>
+        <span>文档生成智能体</span>
+      </div>
+      <div class="header-actions">
+        <span id="current-model-badge" class="model-badge"></span>
+        <button id="btn-config" class="btn btn-ghost" title="模型管理">
+          <i class="fas fa-cog"></i> 模型管理
+        </button>
+      </div>
+    </header>
+
+    <!-- 步骤指示器 -->
+    <div class="steps-bar">
+      <div class="step" data-step="1" id="step-1">
+        <div class="step-circle">1</div>
+        <div class="step-label">需求收集</div>
+      </div>
+      <div class="step-connector"></div>
+      <div class="step" data-step="2" id="step-2">
+        <div class="step-circle">2</div>
+        <div class="step-label">大纲编辑</div>
+      </div>
+      <div class="step-connector"></div>
+      <div class="step" data-step="3" id="step-3">
+        <div class="step-circle">3</div>
+        <div class="step-label">内容生成</div>
+      </div>
+    </div>
+
+    <!-- 第1步：需求收集 -->
+    <section id="panel-1" class="panel active">
+      <div class="panel-card">
+        <h2><i class="fas fa-clipboard-list"></i> 描述您的文档需求</h2>
+        <p class="hint">请尽可能详细地描述，AI将根据您的需求生成完整的文档大纲。您也可以上传需求文档。</p>
+        <form id="form-requirements">
+          <div class="form-group">
+            <label for="inp-topic">文档主题 <span class="required">*</span></label>
+            <input id="inp-topic" type="text" placeholder="例如：数据中台建设方案" required>
+          </div>
+          <div class="form-row form-row-3col">
+            <div class="form-group">
+              <label for="inp-type">文档类型</label>
+              <select id="inp-type">
+                <option value="技术方案">技术方案</option>
+                <option value="需求规格说明书">需求规格说明书</option>
+                <option value="概要设计文档">概要设计文档</option>
+                <option value="详细设计文档">详细设计文档</option>
+                <option value="项目建议书">项目建议书</option>
+                <option value="可行性分析报告">可行性分析报告</option>
+                <option value="技术白皮书">技术白皮书</option>
+                <option value="其他">其他</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="inp-audience">目标读者</label>
+              <input id="inp-audience" type="text" value="技术与管理人员" placeholder="例如：项目经理、技术负责人">
+            </div>
+            <div class="form-group">
+              <label for="inp-depth">目录层级</label>
+              <select id="inp-depth">
+                <option value="1">1 级</option>
+                <option value="2">2 级</option>
+                <option value="3" selected>3 级</option>
+                <option value="4">4 级</option>
+                <option value="5">5 级</option>
+                <option value="6">6 级</option>
+              </select>
+            </div>
+          </div>
+          <!-- 文件上传区 -->
+          <div class="form-group">
+            <label>上传需求文档 <span class="optional">（可选）</span></label>
+            <div class="upload-area" id="upload-area">
+              <input type="file" id="file-input" multiple accept=".pdf,.doc,.docx,.txt,.md" hidden>
+              <div class="upload-placeholder" id="upload-placeholder">
+                <i class="fas fa-cloud-upload-alt fa-2x"></i>
+                <p>点击或拖拽文件到此处上传</p>
+                <p class="upload-hint">支持 PDF、DOC、DOCX、TXT、MD 格式</p>
+              </div>
+              <div class="upload-filelist" id="upload-filelist"></div>
+            </div>
+          </div>
+          <div class="form-group">
+            <label for="inp-requirements">补充需求说明 <span class="optional">（可选，与上传文档内容合并）</span></label>
+            <textarea id="inp-requirements" rows="8" placeholder="您可以直接输入需求描述，也可以先上传文档再在此补充说明。&#10;上传的文档内容将与此处输入的内容合并作为完整需求。"></textarea>
+          </div>
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary btn-lg" id="btn-gen-outline">
+              <i class="fas fa-magic"></i> 生成大纲
+            </button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <!-- 第2步：大纲编辑 -->
+    <section id="panel-2" class="panel">
+      <div class="panel-card">
+        <div class="outline-toolbar">
+          <h2><i class="fas fa-sitemap"></i> 文档大纲</h2>
+          <div class="toolbar-actions">
+            <button class="btn btn-ghost" id="btn-add-chapter" title="添加章节">
+              <i class="fas fa-plus"></i> 添加章节
+            </button>
+            <button class="btn btn-primary" id="btn-confirm-outline">
+              <i class="fas fa-check"></i> 确认大纲，开始生成
+            </button>
+          </div>
+        </div>
+        <p class="hint">双击标题可编辑；每个章节右侧操作按钮：<b>↑</b>在前面插入、<b>+</b>添加子章节、<b>✎</b>编辑、<b>🗑</b>删除。确认无误后点击"确认大纲，开始生成"。</p>
+        <div id="outline-tree" class="outline-tree"></div>
+      </div>
+    </section>
+
+    <!-- 第3步：内容生成 -->
+    <section id="panel-3" class="panel">
+      <div class="gen-layout">
+        <!-- 左侧：章节导航 -->
+        <aside class="gen-sidebar">
+          <div class="sidebar-header">
+            <h3>章节列表</h3>
+            <div class="sidebar-actions">
+              <button class="btn btn-primary btn-sm" id="btn-generate-all" title="一键生成全文">
+                <i class="fas fa-bolt"></i> 生成全文
+              </button>
+              <button class="btn btn-ghost btn-sm" id="btn-export" title="导出DOCX">
+                <i class="fas fa-download"></i> 导出
+              </button>
+            </div>
+          </div>
+          <div id="gen-progress-bar" class="gen-progress-sidebar"></div>
+          <div id="chapter-nav" class="chapter-nav"></div>
+        </aside>
+        <!-- 右侧：内容区 -->
+        <main class="gen-main">
+          <div id="content-area" class="content-area">
+            <div class="content-placeholder">
+              <i class="fas fa-rocket fa-3x"></i>
+              <h3>点击左侧章节开始生成</h3>
+              <p>选择一个章节，AI将为您撰写该章节的详细内容</p>
+            </div>
+          </div>
+        </main>
+      </div>
+    </section>
+
+    <!-- 模型管理弹窗 -->
+    <div id="modal-config" class="modal">
+      <div class="modal-overlay"></div>
+      <div class="modal-content modal-lg">
+        <div class="modal-header">
+          <h3>模型管理</h3>
+          <button class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <!-- 已验证模型列表 -->
+          <div class="model-section">
+            <h4 class="model-section-title"><i class="fas fa-check-circle"></i> 已验证模型</h4>
+            <div id="verified-models-list" class="verified-models-list">
+              <p class="empty-hint">暂无已验证模型，请在下方添加并验证</p>
+            </div>
+          </div>
+
+          <div class="model-divider"></div>
+
+          <!-- 添加/验证新模型 -->
+          <div class="model-section">
+            <h4 class="model-section-title"><i class="fas fa-plus-circle"></i> 添加模型</h4>
+            <div class="form-group">
+              <label>API Base URL</label>
+              <input id="cfg-base-url" type="text" placeholder="https://api.openai.com/v1">
+            </div>
+            <div class="form-group">
+              <label>API Key <span class="optional">（可选）</span></label>
+              <input id="cfg-api-key" type="password" placeholder="sk-... （本地模型可留空）">
+            </div>
+            <div class="form-group">
+              <label>模型名称</label>
+              <input id="cfg-model" type="text" placeholder="gpt-4o / qwen3-30b-a3b / qwen3.5-72b">
+              <p class="form-hint" id="model-type-hint"></p>
+            </div>
+            <div class="form-actions" style="justify-content:flex-start">
+              <button class="btn btn-primary" id="btn-verify-model">
+                <i class="fas fa-plug"></i> 验证并添加
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 导出弹窗 -->
+    <div id="modal-export" class="modal">
+      <div class="modal-overlay"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>导出文档</h3>
+          <button class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <!-- 全文导出 -->
+          <div class="export-section">
+            <div class="export-option" id="export-full">
+              <div class="export-option-icon"><i class="fas fa-file-word"></i></div>
+              <div class="export-option-info">
+                <div class="export-option-title">全文导出</div>
+                <div class="export-option-desc" id="export-full-desc">导出所有章节内容</div>
+              </div>
+              <button class="btn btn-primary btn-sm" id="btn-export-full" disabled>
+                <i class="fas fa-download"></i> 导出
+              </button>
+            </div>
+          </div>
+
+          <div class="model-divider"></div>
+
+          <!-- 按一级目录导出 -->
+          <div class="export-section">
+            <div class="export-section-label">按一级目录导出</div>
+            <div id="export-chapters-list" class="export-chapters-list">
+              <p class="empty-hint">暂无可导出的一级目录</p>
+            </div>
+            <div class="export-actions">
+              <button class="btn btn-primary btn-sm" id="btn-export-partial" disabled>
+                <i class="fas fa-download"></i> 导出选中目录
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 添加/编辑章节弹窗 -->
+    <div id="modal-chapter" class="modal">
+      <div class="modal-overlay"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 id="chapter-modal-title">添加章节</h3>
+          <button class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label>章节标题</label>
+            <input id="ch-title" type="text" placeholder="章节标题">
+          </div>
+          <div class="form-group">
+            <label>章节说明</label>
+            <textarea id="ch-description" rows="3" placeholder="该章节要涵盖的内容"></textarea>
+          </div>
+          <input type="hidden" id="ch-parent-id">
+          <input type="hidden" id="ch-edit-id">
+          <input type="hidden" id="ch-sibling-id">
+          <input type="hidden" id="ch-insert-mode">
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-ghost" id="btn-cancel-chapter">取消</button>
+          <button class="btn btn-primary" id="btn-save-chapter">保存</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js?v=6"></script>
+</body>
+</html>
