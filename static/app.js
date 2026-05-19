@@ -27,13 +27,15 @@
   const $$ = (sel) => document.querySelectorAll(sel);
 
   // ── 工具函数 ──────────────────────────────────────────────────
+  const BASE = "/doc-generation";
+
   async function api(method, path, body) {
     const opts = {
       method,
       headers: { "Content-Type": "application/json" },
     };
     if (body) opts.body = JSON.stringify(body);
-    const resp = await fetch(`/api${path}`, opts);
+    const resp = await fetch(`${BASE}/api${path}`, opts);
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({ detail: resp.statusText }));
       throw new Error(err.detail || resp.statusText);
@@ -154,7 +156,7 @@
       formData.append("file", file);
 
       try {
-        const resp = await fetch("/api/upload-file", {
+        const resp = await fetch(`${BASE}/api/upload-file`, {
           method: "POST",
           body: formData,
         });
@@ -1033,7 +1035,7 @@
     const mdEl = $("#md-content");
 
     try {
-      const ws = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws/generate-chapter`);
+      const ws = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}${BASE}/ws/generate-chapter`);
       generatingAbort = new AbortController();
 
       ws.onopen = () => {
@@ -1234,14 +1236,14 @@
   function handleExportFull() {
     // 全文导出：忽略任何已选择的章节，导出全部内容
     exportSelectedChapters = new Set();
-    window.open(`/api/export-docx/${sessionId}?mode=full&filename=${encodeURIComponent(getDocTopic())}`, "_blank");
+    window.open(`${BASE}/api/export-docx/${sessionId}?mode=full&filename=${encodeURIComponent(getDocTopic())}`, "_blank");
     $("#modal-export").classList.remove("open");
   }
 
   function handleExportPartial() {
     // 按一级目录导出：只导出用户选中的目录
     const ids = Array.from(exportSelectedChapters).join(",");
-    window.open(`/api/export-docx/${sessionId}?mode=partial&chapters=${ids}&filename=${encodeURIComponent(getDocTopic())}`, "_blank");
+    window.open(`${BASE}/api/export-docx/${sessionId}?mode=partial&chapters=${ids}&filename=${encodeURIComponent(getDocTopic())}`, "_blank");
     $("#modal-export").classList.remove("open");
   }
 

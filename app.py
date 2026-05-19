@@ -10,9 +10,9 @@ from typing import Optional
 from urllib.parse import quote
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, APIRouter, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Form
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, RedirectResponse
 from pydantic import BaseModel
 
 from llm_client import LLMClient, detect_model_type
@@ -23,6 +23,9 @@ from file_parser import parse_file
 # ── 配置 ─────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+# 应用路径前缀
+ROOT_PATH = "/doc-generation"
 
 # 持久化配置文件路径
 MODELS_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models_config.json")
@@ -47,7 +50,6 @@ def _b64_decode(text: str) -> str:
     """从 base64 解码字符串，若解码失败则原样返回（兼容旧明文格式）"""
     try:
         decoded = base64.b64decode(text).decode("utf-8")
-        # 简单启发式：API key 通常是可打印 ASCII，若解码出乱码则认为原文不是 base64
         if decoded.isprintable():
             return decoded
     except Exception:
@@ -63,7 +65,6 @@ def _load_models_config():
     try:
         with open(MODELS_CONFIG_FILE, "r", encoding="utf-8") as f:
             cfg = json.load(f)
-        # 解码 api_key（兼容旧明文格式）
         raw_list = cfg.get("verified_models", [])
         verified_models = []
         for m in raw_list:
@@ -86,7 +87,6 @@ def _load_models_config():
 def _save_models_config():
     """将模型配置保存到JSON文件，api_key 使用 base64 编码"""
     try:
-        # 编码 verified_models 中的 api_key
         encoded_models = []
         for m in verified_models:
             encoded_models.append({
@@ -116,15 +116,15 @@ sessions: dict[str, dict] = {}
 def _new_session() -> dict:
     return {
         "outline": None,
-        "chapters_content": {},   # chapter_id -> content string
+        "chapters_content": {},
         "generating": False,
         "current_chapter": None,
-        "global_context": "",     # 全局上下文摘要
-        "outline_tree": "",       # 完整大纲树（仅id+title）
-        "topic": "",              # 用户填写的文档主题
-        "doc_type": "",           # 文档类型
-        "audience": "",           # 目标读者
-        "requirements": "",       # 用户需求（含上传文档内容）
+        "global_context": "",
+        "outline_tree": "",
+        "topic": "",
+        "doc_type": "",
+        "audience": "",
+        "requirements": "",
     }
 
 
@@ -142,7 +142,15 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="文档生成智能体", lifespan=lifespan)
 
 
+# ── 根路径重定向 ──────────────────────────────────────────────
+@app.get("/")
+async def redirect_to_app():
+    return RedirectResponse(url=ROOT_PATH + "/")
+
+
 # ── API 路由 ──────────────────────────────────────────────────
+
+router = APIRouter()
 
 class ConfigRequest(BaseModel):
     base_url: str
@@ -165,7 +173,7 @@ class ChapterGenerateRequest(BaseModel):
 
 # ── 模型管理 ──────────────────────────────────────────────────
 
-@app.post("/api/config")
+@router.post("/api/config")
 async def update_config(req: ConfigRequest):
     """设置当前使用的模型"""
     global LLM_BASE_URL, LLM_API_KEY, LLM_MODEL
@@ -176,7 +184,7 @@ async def update_config(req: ConfigRequest):
     return {"status": "ok", "model": LLM_MODEL, "model_type": detect_model_type(LLM_MODEL)}
 
 
-@app.get("/api/config")
+@router.get("/api/config")
 async def get_config():
     """获取当前LLM配置"""
     return {
@@ -187,14 +195,13 @@ async def get_config():
     }
 
 
-@app.post("/api/verify-model")
+@router.post("/api/verify-model")
 async def verify_model(req: ConfigRequest):
     """验证模型是否可用，验证成功后自动设为当前模型"""
     global LLM_BASE_URL, LLM_API_KEY, LLM_MODEL, verified_models
     llm = LLMClient(base_url=req.base_url, api_key=req.api_key, model=req.model)
     result = await llm.verify()
     if result["ok"]:
-        # 添加到已验证列表（避免重复）
         for i, m in enumerate(verified_models):
             if m["base_url"] == req.base_url and m["model"] == req.model:
                 verified_models[i] = {
@@ -211,7 +218,6 @@ async def verify_model(req: ConfigRequest):
                 "model": req.model,
                 "model_type": result["model_type"],
             })
-        # 验证成功后自动切换为当前模型
         LLM_BASE_URL = req.base_url
         LLM_API_KEY = req.api_key
         LLM_MODEL = req.model
@@ -220,10 +226,9 @@ async def verify_model(req: ConfigRequest):
     return result
 
 
-@app.get("/api/models")
+@router.get("/api/models")
 async def list_verified_models():
     """获取已验证模型列表"""
-    # 不暴露完整 api_key
     safe_list = []
     for m in verified_models:
         safe_list.append({
@@ -235,7 +240,7 @@ async def list_verified_models():
     return safe_list
 
 
-@app.post("/api/select-model")
+@router.post("/api/select-model")
 async def select_model(idx: int):
     """从已验证模型中选择一个作为当前模型"""
     global LLM_BASE_URL, LLM_API_KEY, LLM_MODEL
@@ -251,7 +256,7 @@ async def select_model(idx: int):
 
 # ── 会话管理 ──────────────────────────────────────────────────
 
-@app.post("/api/session")
+@router.post("/api/session")
 async def create_session():
     """创建新会话"""
     sid = uuid.uuid4().hex[:12]
@@ -259,7 +264,7 @@ async def create_session():
     return {"session_id": sid}
 
 
-@app.get("/api/session/{session_id}")
+@router.get("/api/session/{session_id}")
 async def get_session(session_id: str):
     """获取会话状态"""
     if session_id not in sessions:
@@ -277,7 +282,7 @@ async def get_session(session_id: str):
 
 # ── 文件上传解析 ──────────────────────────────────────────────────
 
-@app.post("/api/upload-file")
+@router.post("/api/upload-file")
 async def upload_file(file: UploadFile = File(...)):
     """上传文件并解析文本内容"""
     filename = file.filename or ""
@@ -303,7 +308,7 @@ async def upload_file(file: UploadFile = File(...)):
 
 # ── 文档生成 ──────────────────────────────────────────────────
 
-@app.post("/api/generate-outline")
+@router.post("/api/generate-outline")
 async def generate_outline(req: OutlineRequest):
     """生成文档大纲"""
     if req.session_id not in sessions:
@@ -330,7 +335,6 @@ async def generate_outline(req: OutlineRequest):
     sessions[req.session_id]["audience"] = req.audience
     sessions[req.session_id]["requirements"] = req.requirements
 
-    # 最终校验：确认返回的大纲深度不超过用户要求的深度
     actual = DocGenerator._get_actual_depth(outline.get("chapters", []))
     if actual > req.depth:
         logger.error("!!! 大纲深度校验失败：实际深度=%d，要求深度=%d，强制再次截断 !!!", actual, req.depth)
@@ -339,7 +343,7 @@ async def generate_outline(req: OutlineRequest):
     return outline
 
 
-@app.post("/api/update-outline")
+@router.post("/api/update-outline")
 async def update_outline(session_id: str, outline: dict):
     """更新大纲（用户编辑后保存）"""
     if session_id not in sessions:
@@ -349,7 +353,7 @@ async def update_outline(session_id: str, outline: dict):
     return {"status": "ok"}
 
 
-@app.post("/api/prepare-generation")
+@router.post("/api/prepare-generation")
 async def prepare_generation(session_id: str):
     """确认大纲后，生成全局上下文摘要和大纲树，为后续章节生成做准备"""
     if session_id not in sessions:
@@ -360,11 +364,9 @@ async def prepare_generation(session_id: str):
     if not outline:
         raise HTTPException(400, "请先生成大纲")
 
-    # 构建大纲树（仅id+title）
     outline_tree = DocGenerator.build_outline_tree(outline)
     s["outline_tree"] = outline_tree
 
-    # 生成全局上下文摘要
     llm = _get_llm_client()
     gen = DocGenerator(llm)
     try:
@@ -389,13 +391,12 @@ async def prepare_generation(session_id: str):
     }
 
 
-@app.websocket("/ws/generate-chapter")
+@router.websocket("/ws/generate-chapter")
 async def ws_generate_chapter(ws: WebSocket):
     """WebSocket接口：流式生成单章内容"""
     await ws.accept()
     session_id = None
     try:
-        # 接收参数
         data = await ws.receive_json()
         session_id = data["session_id"]
         chapter_id = data["chapter_id"]
@@ -413,7 +414,6 @@ async def ws_generate_chapter(ws: WebSocket):
             await ws.close()
             return
 
-        # 查找章节信息
         flat = DocGenerator.flatten_chapters(outline)
         chapter_info = None
         for ch in flat:
@@ -426,25 +426,20 @@ async def ws_generate_chapter(ws: WebSocket):
             await ws.close()
             return
 
-        # 全局上下文
         global_context = s.get("global_context", "")
         if not global_context:
             global_context = f"文档主题：{outline.get('title', '')}"
 
-        # 大纲树
         outline_toc = s.get("outline_tree", "")
         if not outline_toc:
             outline_toc = DocGenerator.build_outline_tree(outline)
 
-        # 当前章节的大纲目录（标注★）
         outline_toc_marked = DocGenerator.build_outline_toc(outline, chapter_id)
 
-        # 前一章摘要
         prev_chapter_summary = DocGenerator.build_prev_chapter_summary(
             s["chapters_content"], flat, chapter_id
         )
 
-        # 流式生成
         s["generating"] = True
         s["current_chapter"] = chapter_id
         llm = _get_llm_client()
@@ -464,7 +459,6 @@ async def ws_generate_chapter(ws: WebSocket):
             full_content.append(token)
             await ws.send_json({"type": "token", "content": token})
 
-        # 保存完成的内容
         content = "".join(full_content)
         s["chapters_content"][chapter_id] = content
         s["generating"] = False
@@ -489,15 +483,9 @@ async def ws_generate_chapter(ws: WebSocket):
             sessions[session_id]["current_chapter"] = None
 
 
-@app.get("/api/export-docx/{session_id}")
+@router.get("/api/export-docx/{session_id}")
 async def export_docx(session_id: str, mode: str = "", chapters: str = "", filename: str = ""):
-    """导出文档为DOCX
-
-    参数:
-    - mode: 导出模式。"full" 为全文导出，"partial" 为按选择导出。默认根据 chapters 是否为空自动判断。
-    - chapters: 指定导出的一级目录id，逗号分隔。仅在 partial 模式下使用。
-    - filename: 指定文件名（不含扩展名）。为空则使用大纲标题。
-    """
+    """导出文档为DOCX"""
     if session_id not in sessions:
         raise HTTPException(404, "会话不存在")
 
@@ -508,28 +496,23 @@ async def export_docx(session_id: str, mode: str = "", chapters: str = "", filen
     outline = s["outline"]
     chapters_content = s["chapters_content"]
 
-    # 全文导出：忽略 chapters 参数，导出全部内容
     if mode == "full":
         try:
             doc_bytes = export_to_docx(outline, chapters_content)
         except Exception as e:
             logger.exception("导出DOCX失败")
             raise HTTPException(500, f"导出失败: {e}")
-    # 按选择导出
     elif mode == "partial" or chapters:
         chapter_ids = [cid.strip() for cid in chapters.split(",") if cid.strip()]
         if not chapter_ids:
             raise HTTPException(400, "未指定要导出的目录")
 
-        # 从一级目录中筛选
         top_chapters = outline.get("chapters", [])
         selected_top = [ch for ch in top_chapters if ch.get("id") in chapter_ids]
         if not selected_top:
             raise HTTPException(400, "未找到指定的一级目录")
 
-        # 构建子大纲
         sub_outline = {"title": outline.get("title", "文档"), "chapters": selected_top}
-        # 构建子内容字典
         flat_ids = set()
         def collect_ids(ch_list):
             for ch in ch_list:
@@ -543,7 +526,6 @@ async def export_docx(session_id: str, mode: str = "", chapters: str = "", filen
         except Exception as e:
             logger.exception("导出DOCX失败")
             raise HTTPException(500, f"导出失败: {e}")
-    # 兜底：无 mode 也无 chapters，默认全文导出
     else:
         try:
             doc_bytes = export_to_docx(outline, chapters_content)
@@ -551,12 +533,8 @@ async def export_docx(session_id: str, mode: str = "", chapters: str = "", filen
             logger.exception("导出DOCX失败")
             raise HTTPException(500, f"导出失败: {e}")
 
-    # 文件名：优先使用参数，其次使用大纲标题
     fname = filename or outline.get("title", "文档")
-    # 清理文件名中的非法字符（保留中文、字母、数字、常用符号）
     fname = "".join(c for c in fname if c.isalnum() or c in "._- ")
-
-    # RFC 5987 编码文件名以支持中文
     fname_utf8 = quote(fname + ".docx")
 
     return StreamingResponse(
@@ -568,10 +546,13 @@ async def export_docx(session_id: str, mode: str = "", chapters: str = "", filen
     )
 
 
-# ── 静态文件 ──────────────────────────────────────────────────
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
+# ── 注册路由 ──────────────────────────────────────────────────
+app.include_router(router, prefix=ROOT_PATH)
+
+# ── 静态文件（放在 include_router 之后，确保 API 路由优先匹配） ──
+app.mount(ROOT_PATH, StaticFiles(directory="static", html=True), name="static")
 
 
 # ── 入口 ──────────────────────────────────────────────────────
 if __name__ == "__main__":
-    uvicorn.run("app:app", host="0.0.0.0", port=8765, reload=True)
+    uvicorn.run("app:app", host="0.0.0.0", port=5003, reload=True)
