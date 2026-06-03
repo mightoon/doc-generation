@@ -189,7 +189,12 @@
               <input id="cfg-api-key" type="password" placeholder="sk-... （本地模型可留空）">
             </div>
             <div class="form-group">
-              <label>模型名称</label>
+              <label>显示名称 <span class="required">*</span></label>
+              <input id="cfg-display-name" type="text" placeholder="给模型起个易于区分的名称，如"公司GPT-4o"">
+              <p class="form-hint">用于在列表中显示和区分模型，不可重复</p>
+            </div>
+            <div class="form-group">
+              <label>模型ID</label>
               <input id="cfg-model" type="text" placeholder="gpt-4o / qwen3-30b-a3b / qwen3.5-72b">
               <p class="form-hint" id="model-type-hint"></p>
             </div>

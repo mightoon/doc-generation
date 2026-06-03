@@ -1,10 +1,11 @@
 """LLM客户端 - 支持OpenAI兼容接口，自动处理qwen3系列thinking模式"""
+import asyncio
 import json
 import logging
 import re
 from typing import AsyncGenerator, Optional
 
-from openai import AsyncOpenAI, APIConnectionError, AuthenticationError
+from openai import AsyncOpenAI, APIConnectionError, AuthenticationError, APIError, RateLimitError
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +30,33 @@ def detect_model_type(model_name: str) -> str:
     return "other"
 
 
+# ── 全局单例客户端 ──────────────────────────────────────────────
+_global_client: Optional[AsyncOpenAI] = None
+_global_base_url: str = ""
+_global_api_key: str = ""
+
+
+def _get_shared_client(base_url: str, api_key: str) -> AsyncOpenAI:
+    """获取全局共享的 AsyncOpenAI 客户端，避免每次请求都新建连接池"""
+    global _global_client, _global_base_url, _global_api_key
+    if _global_client is None or _global_base_url != base_url or _global_api_key != api_key:
+        # 配置变更时重建客户端
+        if _global_client is not None:
+            # 旧客户端需要关闭，但不阻塞当前请求
+            try:
+                asyncio.get_event_loop().create_task(_global_client.close())
+            except RuntimeError:
+                pass
+        _global_client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+        _global_base_url = base_url
+        _global_api_key = api_key
+        logger.info("AsyncOpenAI 客户端已重建: base_url=%s", base_url)
+    return _global_client
+
+
 class LLMClient:
     def __init__(self, base_url: str, api_key: str, model: str):
-        self.client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+        self.client = _get_shared_client(base_url, api_key)
         self.model = model
         self.model_type = detect_model_type(model)
 
@@ -65,8 +90,15 @@ class LLMClient:
         response = await self.client.chat.completions.create(**kwargs)
         return response.choices[0].message.content
 
-    async def stream_generate(self, system_prompt: str, user_prompt: str, temperature: float = 0.7) -> AsyncGenerator[str, None]:
-        """流式生成，逐token返回"""
+    async def stream_generate(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.7,
+        max_retries: int = 3,
+        retry_delay: float = 2.0,
+    ) -> AsyncGenerator[str, None]:
+        """流式生成，逐token返回，带自动重试"""
         kwargs = dict(
             model=self.model,
             messages=[
@@ -80,10 +112,25 @@ class LLMClient:
         if extra:
             kwargs["extra_body"] = extra
 
-        stream = await self.client.chat.completions.create(**kwargs)
-        async for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+        for attempt in range(1, max_retries + 1):
+            try:
+                stream = await self.client.chat.completions.create(**kwargs)
+                async for chunk in stream:
+                    if chunk.choices and chunk.choices[0].delta.content:
+                        yield chunk.choices[0].delta.content
+                return  # 成功完成，退出重试循环
+            except (APIError, APIConnectionError, RateLimitError) as e:
+                logger.warning(
+                    "流式生成失败（第 %d/%d 次尝试）: %s: %s",
+                    attempt, max_retries, type(e).__name__, e,
+                )
+                if attempt < max_retries:
+                    wait = retry_delay * attempt  # 递增等待
+                    logger.info("等待 %.1f 秒后重试...", wait)
+                    await asyncio.sleep(wait)
+                else:
+                    logger.error("流式生成重试 %d 次后仍失败，放弃", max_retries)
+                    raise
 
     async def verify(self) -> dict:
         """

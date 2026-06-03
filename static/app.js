@@ -17,7 +17,7 @@
   let uploadedFiles = [];  // [{filename, text, length}]
 
   // 当前激活模型
-  let activeModel = null;  // {base_url, api_key, model, model_type}
+  let activeModel = null;  // {base_url, api_key, model, display_name, model_type}
 
   // 表单快照（用于检测需求是否修改）
   let formSnapshot = null;  // 上次生成大纲时的表单值快照
@@ -971,6 +971,7 @@
 
   let batchQueue = [];       // 批量生成队列
   let batchStopped = false;  // 是否已停止批量生成
+  const BATCH_CHAPTER_DELAY = 3;  // 多章节间延迟秒数，让LLM服务端释放资源
 
   async function startBatchGenerate(chIds) {
     if (generatingChapter) {
@@ -986,14 +987,16 @@
 
     if (chIds.length === 1) {
       // 单章节：直接流式生成
-      await generateSingleChapter(chIds[0]);
+      await generateSingleChapter(chIds[0], 0);
     } else {
-      // 多章节：逐个生成
+      // 多章节：逐个生成，章节间加入延迟
       batchQueue = [...chIds];
       batchStopped = false;
-      for (const chId of batchQueue) {
+      for (let i = 0; i < batchQueue.length; i++) {
         if (batchStopped) break;
-        await generateSingleChapter(chId);
+        // 第二个章节开始加入延迟，让LLM服务端释放资源
+        const delay = i > 0 ? BATCH_CHAPTER_DELAY : 0;
+        await generateSingleChapter(batchQueue[i], delay);
       }
       batchQueue = [];
       toast(batchStopped ? "批量生成已停止" : "批量生成全部完成", batchStopped ? "info" : "success");
@@ -1001,7 +1004,7 @@
     }
   }
 
-  async function generateSingleChapter(chId) {
+  async function generateSingleChapter(chId, preDelay) {
     generatingChapter = chId;
     renderChapterNav();
     renderContentArea();
@@ -1043,6 +1046,7 @@
           session_id: sessionId,
           chapter_id: chId,
           min_words: 800,
+          pre_delay: preDelay || 0,
         }));
       };
 
@@ -1053,6 +1057,10 @@
           mdEl.innerHTML = renderMarkdown(fullContent);
           mdEl.classList.add("typing-cursor");
           area.scrollTop = area.scrollHeight;
+        } else if (data.type === "delay") {
+          // 多章节间延迟提示
+          mdEl.innerHTML = `<p style="color:var(--gray-400)"><i class="fas fa-hourglass-half"></i> 等待 ${data.seconds} 秒，释放服务端资源...</p>`;
+          mdEl.classList.add("typing-cursor");
         } else if (data.type === "done") {
           ws.close();
           chaptersContent[chId] = fullContent;
@@ -1270,8 +1278,8 @@
       $("#cfg-model").value = cfg.model || "";
       updateModelTypeHint(cfg.model);
       if (cfg.model) {
-        activeModel = { base_url: cfg.base_url, api_key: "", model: cfg.model, model_type: cfg.model_type };
-        updateModelBadge(cfg.model, cfg.model_type);
+        activeModel = { base_url: cfg.base_url, api_key: "", model: cfg.model, display_name: cfg.display_name || "", model_type: cfg.model_type };
+        updateModelBadge(cfg.display_name || cfg.model, cfg.model_type);
       }
     } catch (err) {
       // ignore
@@ -1281,6 +1289,9 @@
   async function loadVerifiedModels() {
     try {
       const [models, cfg] = await Promise.all([api("GET", "/models"), api("GET", "/config")]);
+      if (cfg.model) {
+        activeModel = activeModel || { base_url: cfg.base_url, model: cfg.model, display_name: cfg.display_name || "", model_type: cfg.model_type };
+      }
       renderVerifiedModels(models, cfg.model);
     } catch (err) {
       console.warn("加载模型列表失败:", err);
@@ -1298,7 +1309,11 @@
     models.forEach((m, idx) => {
       const item = document.createElement("div");
       item.className = "model-item";
-      if (m.model === currentModelName) item.classList.add("active");
+      const displayName = m.display_name || m.model;
+      // 通过 model + base_url 匹配当前激活模型
+      if (activeModel && m.model === activeModel.model && m.base_url === activeModel.base_url) {
+        item.classList.add("active");
+      }
 
       const iconClass = m.model_type === "qwen3" || m.model_type === "qwen3x"
         ? "fa-robot" : "fa-brain";
@@ -1306,23 +1321,39 @@
       item.innerHTML = `
         <div class="model-icon"><i class="fas ${iconClass}"></i></div>
         <div class="model-info">
-          <div class="model-name">${m.model}</div>
-          <div class="model-detail">${m.base_url}</div>
+          <div class="model-name">${displayName}</div>
+          <div class="model-detail">${m.model} · ${m.base_url}</div>
         </div>
         <span class="model-type-tag ${m.model_type}">${modelTypeLabel(m.model_type)}</span>
         <button class="model-select-btn" data-idx="${idx}">选择</button>
         <span class="model-active-label"><i class="fas fa-check-circle"></i> 当前</span>
+        <button class="model-delete-btn" data-idx="${idx}" title="删除"><i class="fas fa-trash-alt"></i></button>
       `;
 
       item.querySelector(".model-select-btn").addEventListener("click", async () => {
         try {
           const result = await api("POST", `/select-model?idx=${idx}`);
           activeModel = m;
-          updateModelBadge(m.model, m.model_type);
-          toast(`已切换到模型 ${m.model}`, "success");
+          updateModelBadge(displayName, m.model_type);
+          toast(`已切换到模型 ${displayName}`, "success");
           renderVerifiedModels(models, m.model);
         } catch (err) {
           toast("切换模型失败: " + err.message, "error");
+        }
+      });
+
+      item.querySelector(".model-delete-btn").addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if (!confirm(`确定删除模型 "${displayName}" 吗？`)) return;
+        try {
+          const result = await api("DELETE", `/delete-model?idx=${idx}`);
+          toast(`已删除模型 ${displayName}`, "success");
+          // 刷新列表和当前配置
+          const [newModels, cfg] = await Promise.all([api("GET", "/models"), api("GET", "/config")]);
+          renderVerifiedModels(newModels, cfg.model);
+          updateModelBadge(cfg.display_name || cfg.model, cfg.model_type);
+        } catch (err) {
+          toast("删除模型失败: " + err.message, "error");
         }
       });
 
@@ -1330,9 +1361,9 @@
     });
   }
 
-  function updateModelBadge(modelName, modelType) {
+  function updateModelBadge(displayName, modelType) {
     const badge = $("#current-model-badge");
-    badge.textContent = `${modelName} (${modelTypeLabel(modelType)})`;
+    badge.textContent = `${displayName} (${modelTypeLabel(modelType)})`;
     badge.classList.add("visible");
   }
 
@@ -1359,9 +1390,15 @@
     const baseUrl = $("#cfg-base-url").value.trim();
     const apiKey = $("#cfg-api-key").value.trim();
     const model = $("#cfg-model").value.trim();
+    const displayName = $("#cfg-display-name").value.trim();
 
     if (!baseUrl || !model) {
-      toast("请填写 Base URL 和模型名称", "error");
+      toast("请填写 Base URL 和模型ID", "error");
+      return;
+    }
+
+    if (!displayName) {
+      toast("请填写显示名称", "error");
       return;
     }
 
@@ -1374,15 +1411,18 @@
         base_url: baseUrl,
         api_key: apiKey,
         model: model,
+        display_name: displayName,
       });
 
       if (result.ok) {
         toast(result.message, "success");
-        activeModel = { base_url: baseUrl, api_key: apiKey, model: model, model_type: result.model_type };
-        updateModelBadge(model, result.model_type);
-        // 刷新已验证模型列表（传入当前模型名用于高亮）
+        activeModel = { base_url: baseUrl, api_key: apiKey, model: model, display_name: displayName, model_type: result.model_type };
+        updateModelBadge(displayName, result.model_type);
+        // 刷新已验证模型列表
         const models = await api("GET", "/models");
         renderVerifiedModels(models, model);
+        // 清空显示名称输入框，方便下次添加
+        $("#cfg-display-name").value = "";
       } else {
         toast(result.message, "error");
       }

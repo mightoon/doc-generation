@@ -882,6 +882,15 @@ body {
 }
 .model-item .model-select-btn:hover { border-color: var(--primary); color: var(--primary); }
 .model-item.active .model-select-btn { display: none; }
+.model-item .model-delete-btn {
+  width: 28px; height: 28px;
+  border: none; background: transparent;
+  color: var(--gray-400); cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; flex-shrink: 0; transition: all 0.15s;
+}
+.model-item .model-delete-btn:hover { background: var(--danger-bg); color: var(--danger); }
+.model-item.active .model-delete-btn { display: none; }
 .model-item .model-active-label {
   font-size: 12px;
   color: var(--success);

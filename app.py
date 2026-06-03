@@ -1,4 +1,5 @@
 """文档生成智能体 - 主应用"""
+import asyncio
 import base64
 import io
 import json
@@ -36,7 +37,7 @@ LLM_API_KEY = os.getenv("LLM_API_KEY", "sk-your-key-here")
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o")
 
 # ── 已验证模型列表 ──────────────────────────────────────────────
-verified_models: list[dict] = []  # [{"base_url", "api_key", "model", "model_type"}]
+verified_models: list[dict] = []  # [{"base_url", "api_key", "model", "display_name", "model_type"}]
 
 
 # ── 模型配置持久化 ──────────────────────────────────────────────
@@ -68,10 +69,12 @@ def _load_models_config():
         raw_list = cfg.get("verified_models", [])
         verified_models = []
         for m in raw_list:
+            model_id = m.get("model", "")
             verified_models.append({
                 "base_url": m.get("base_url", ""),
                 "api_key": _b64_decode(m.get("api_key", "")),
-                "model": m.get("model", ""),
+                "model": model_id,
+                "display_name": m.get("display_name", "") or model_id,
                 "model_type": m.get("model_type", ""),
             })
         current = cfg.get("current_model")
@@ -93,6 +96,7 @@ def _save_models_config():
                 "base_url": m["base_url"],
                 "api_key": _b64_encode(m["api_key"]),
                 "model": m["model"],
+                "display_name": m.get("display_name", ""),
                 "model_type": m.get("model_type", ""),
             })
         cfg = {
@@ -156,6 +160,7 @@ class ConfigRequest(BaseModel):
     base_url: str
     api_key: str = ""
     model: str
+    display_name: str = ""
 
 class OutlineRequest(BaseModel):
     session_id: str
@@ -187,10 +192,17 @@ async def update_config(req: ConfigRequest):
 @router.get("/api/config")
 async def get_config():
     """获取当前LLM配置"""
+    # 查找当前模型的 display_name
+    current_display_name = ""
+    for m in verified_models:
+        if m["model"] == LLM_MODEL and m["base_url"] == LLM_BASE_URL:
+            current_display_name = m.get("display_name", "")
+            break
     return {
         "base_url": LLM_BASE_URL,
         "api_key": LLM_API_KEY[:8] + "..." if len(LLM_API_KEY) > 8 else ("***" if LLM_API_KEY else ""),
         "model": LLM_MODEL,
+        "display_name": current_display_name,
         "model_type": detect_model_type(LLM_MODEL),
     }
 
@@ -199,15 +211,21 @@ async def get_config():
 async def verify_model(req: ConfigRequest):
     """验证模型是否可用，验证成功后自动设为当前模型"""
     global LLM_BASE_URL, LLM_API_KEY, LLM_MODEL, verified_models
+    # 检查显示名称是否重复
+    display_name = req.display_name.strip() or req.model
+    for m in verified_models:
+        if m.get("display_name") == display_name:
+            raise HTTPException(400, f"显示名称 \"{display_name}\" 已被使用，请换一个")
     llm = LLMClient(base_url=req.base_url, api_key=req.api_key, model=req.model)
     result = await llm.verify()
     if result["ok"]:
         for i, m in enumerate(verified_models):
-            if m["base_url"] == req.base_url and m["model"] == req.model:
+            if m.get("display_name") == display_name:
                 verified_models[i] = {
                     "base_url": req.base_url,
                     "api_key": req.api_key,
                     "model": req.model,
+                    "display_name": display_name,
                     "model_type": result["model_type"],
                 }
                 break
@@ -216,6 +234,7 @@ async def verify_model(req: ConfigRequest):
                 "base_url": req.base_url,
                 "api_key": req.api_key,
                 "model": req.model,
+                "display_name": display_name,
                 "model_type": result["model_type"],
             })
         LLM_BASE_URL = req.base_url
@@ -235,6 +254,7 @@ async def list_verified_models():
             "base_url": m["base_url"],
             "api_key": m["api_key"][:8] + "..." if len(m["api_key"]) > 8 else ("***" if m["api_key"] else ""),
             "model": m["model"],
+            "display_name": m.get("display_name", ""),
             "model_type": m["model_type"],
         })
     return safe_list
@@ -251,7 +271,29 @@ async def select_model(idx: int):
     LLM_API_KEY = m["api_key"]
     LLM_MODEL = m["model"]
     _save_models_config()
-    return {"status": "ok", "model": LLM_MODEL, "model_type": m["model_type"]}
+    return {"status": "ok", "model": LLM_MODEL, "display_name": m.get("display_name", ""), "model_type": m["model_type"]}
+
+
+@router.delete("/api/delete-model")
+async def delete_model(idx: int):
+    """删除已验证模型"""
+    global LLM_BASE_URL, LLM_API_KEY, LLM_MODEL
+    if idx < 0 or idx >= len(verified_models):
+        raise HTTPException(400, "无效的模型索引")
+    removed = verified_models.pop(idx)
+    # 如果删除的是当前使用的模型，切换到列表中第一个（若有）
+    if removed["model"] == LLM_MODEL and removed["base_url"] == LLM_BASE_URL:
+        if verified_models:
+            m = verified_models[0]
+            LLM_BASE_URL = m["base_url"]
+            LLM_API_KEY = m["api_key"]
+            LLM_MODEL = m["model"]
+        else:
+            LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
+            LLM_API_KEY = os.getenv("LLM_API_KEY", "sk-your-key-here")
+            LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o")
+    _save_models_config()
+    return {"status": "ok", "current_model": LLM_MODEL}
 
 
 # ── 会话管理 ──────────────────────────────────────────────────
@@ -401,6 +443,7 @@ async def ws_generate_chapter(ws: WebSocket):
         session_id = data["session_id"]
         chapter_id = data["chapter_id"]
         min_words = data.get("min_words", 800)
+        pre_delay = data.get("pre_delay", 0)  # 生成前延迟（秒），用于多章节间间隔
 
         if session_id not in sessions:
             await ws.send_json({"type": "error", "message": "会话不存在"})
@@ -444,6 +487,12 @@ async def ws_generate_chapter(ws: WebSocket):
         s["current_chapter"] = chapter_id
         llm = _get_llm_client()
         gen = DocGenerator(llm)
+
+        # 多章节间延迟：让 LLM 服务端释放资源
+        if pre_delay > 0:
+            logger.info("章节 %s 生成前延迟 %.1f 秒", chapter_id, pre_delay)
+            await ws.send_json({"type": "delay", "seconds": pre_delay})
+            await asyncio.sleep(pre_delay)
 
         full_content = []
         async for token in gen.stream_chapter(
